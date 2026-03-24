@@ -1,0 +1,1133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>Ninja Runner Game</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script>
+    Babel.registerPreset('tsx', {
+      presets: [
+        [Babel.availablePresets['typescript'], { isTSX: true, allExtensions: true }],
+        Babel.availablePresets['react']
+      ]
+    });
+  </script>
+  <style>
+    body { margin: 0; padding: 0; background-color: #171717; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel" data-presets="tsx">
+    const { useEffect, useRef, useState, useCallback } = React;
+
+/**
+ * @license
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+
+const CANVAS_WIDTH = 800;
+const CANVAS_HEIGHT = 400;
+const GROUND_Y = 320;
+
+interface Ninja {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  vy: number;
+  isJumping: boolean;
+  jumpCount: number;
+  isSliding: boolean;
+  isBlocking: boolean;
+  blockEndTime: number;
+}
+
+interface Obstacle {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  passed: boolean;
+  type: 'bird' | 'monster' | 'shuriken' | 'building' | 'sword';
+  vx?: number;
+  vy?: number;
+}
+
+interface Cloud {
+  x: number;
+  y: number;
+  width: number;
+  speed: number;
+}
+
+interface EnemyNinja {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  vy: number;
+  isActive: boolean;
+  actionTimer: number;
+  jumpCount: number;
+  targetX: number;
+  moveTimer: number;
+  hp: number;
+  maxHp: number;
+  isDead: boolean;
+  type: 'purple' | 'green' | 'red' | 'white';
+}
+
+interface PlayerShuriken {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  vx: number;
+}
+
+function App() {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [gameState, setGameState] = useState<'START' | 'PLAYING' | 'GAMEOVER'>('START');
+  const [score, setScore] = useState(0);
+  const [highScore, setHighScore] = useState(0);
+
+  const touchStartRef = useRef({ x: 0, y: 0, time: 0, buttonPressed: false });
+  const slideTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  const gameStateRef = useRef({
+    ninja: { x: 80, y: GROUND_Y - 40, width: 30, height: 40, vy: 0, isJumping: false, jumpCount: 0, isSliding: false, isBlocking: false, blockEndTime: 0 },
+    enemyNinjas: [] as EnemyNinja[],
+    purpleDeathScore: null as number | null,
+    greenDeathScore: null as number | null,
+    redDeathScore: null as number | null,
+    redSpawned: false,
+    whiteSpawned: false,
+    white2Spawned: false,
+    obstacles: [] as Obstacle[],
+    clouds: [] as Cloud[],
+    playerShurikens: [] as PlayerShuriken[],
+    lastShurikenTime: 0,
+    lastBlockTime: 0,
+    score: 0,
+    frames: 0,
+    speed: 6,
+    isGameOver: false,
+    lastTime: 0,
+  });
+
+  const initGame = useCallback(() => {
+    gameStateRef.current = {
+      ninja: { x: 80, y: GROUND_Y - 40, width: 30, height: 40, vy: 0, isJumping: false, jumpCount: 0, isSliding: false, isBlocking: false, blockEndTime: 0 },
+      enemyNinjas: [],
+      purpleDeathScore: null,
+      greenDeathScore: null,
+      redDeathScore: null,
+      redSpawned: false,
+      whiteSpawned: false,
+      white2Spawned: false,
+      obstacles: [],
+      playerShurikens: [],
+      lastShurikenTime: 0,
+      lastBlockTime: 0,
+      clouds: Array.from({ length: 6 }).map(() => ({
+        x: Math.random() * CANVAS_WIDTH,
+        y: 20 + Math.random() * (GROUND_Y - 150),
+        width: 40 + Math.random() * 60,
+        speed: 0.2 + Math.random() * 0.5,
+      })),
+      score: 0,
+      frames: 0,
+      speed: 6,
+      isGameOver: false,
+      lastTime: performance.now(),
+    };
+    setScore(0);
+  }, []);
+
+  const startGame = useCallback(() => {
+    initGame();
+    setGameState('PLAYING');
+  }, [initGame]);
+
+  const jump = useCallback(() => {
+    const state = gameStateRef.current;
+    if (state.isGameOver) return;
+    
+    if (state.ninja.jumpCount < 2) {
+      state.ninja.vy = -12;
+      state.ninja.isJumping = true;
+      state.ninja.jumpCount++;
+      state.ninja.isSliding = false;
+      state.ninja.height = 40;
+    }
+  }, []);
+
+  const slide = useCallback((isSliding: boolean) => {
+    const state = gameStateRef.current;
+    if (state.isGameOver || state.ninja.isJumping) return;
+    
+    state.ninja.isSliding = isSliding;
+    if (isSliding) {
+      state.ninja.height = 20;
+      state.ninja.y = GROUND_Y - 20;
+    } else {
+      state.ninja.height = 40;
+      state.ninja.y = GROUND_Y - 40;
+    }
+  }, []);
+
+  const throwShuriken = useCallback(() => {
+    const state = gameStateRef.current;
+    if (state.isGameOver) return;
+    
+    const now = Date.now();
+    if (now - state.lastShurikenTime >= 250) {
+      state.lastShurikenTime = now;
+      state.playerShurikens.push({
+        x: state.ninja.x + state.ninja.width,
+        y: state.ninja.y + state.ninja.height / 2 - 10,
+        width: 20,
+        height: 20,
+        vx: 12, // fast speed
+      });
+    }
+  }, []);
+
+  const block = useCallback(() => {
+    const state = gameStateRef.current;
+    if (state.isGameOver) return;
+    
+    const now = Date.now();
+    if (now - state.lastBlockTime >= 1000) {
+      state.lastBlockTime = now;
+      state.ninja.isBlocking = true;
+      state.ninja.blockEndTime = now + 400; // 400ms block duration
+    }
+  }, []);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.code === 'Space' || e.code === 'ArrowUp') {
+        e.preventDefault();
+        if (gameState === 'PLAYING') {
+          jump();
+        } else {
+          startGame();
+        }
+      } else if (e.code === 'ArrowDown') {
+        e.preventDefault();
+        if (gameState === 'PLAYING') {
+          slide(true);
+        }
+      } else if (e.code === 'KeyQ' || e.key === 'q' || e.key === 'Q') {
+        e.preventDefault();
+        if (gameState === 'PLAYING') {
+          throwShuriken();
+        }
+      } else if (e.code === 'KeyW' || e.key === 'w' || e.key === 'W') {
+        e.preventDefault();
+        if (gameState === 'PLAYING') {
+          block();
+        }
+      }
+    };
+
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (e.code === 'ArrowDown') {
+        e.preventDefault();
+        if (gameState === 'PLAYING') {
+          slide(false);
+        }
+      }
+    };
+
+    const handleTouchStart = (e: TouchEvent) => {
+      if (e.target instanceof HTMLButtonElement) return;
+      e.preventDefault();
+      
+      const touch = e.touches[0];
+      const canvas = canvasRef.current;
+      let buttonPressed = false;
+      
+      if (canvas) {
+        const rect = canvas.getBoundingClientRect();
+        const scaleX = CANVAS_WIDTH / rect.width;
+        const scaleY = CANVAS_HEIGHT / rect.height;
+        const x = (touch.clientX - rect.left) * scaleX;
+        const y = (touch.clientY - rect.top) * scaleY;
+
+        // Check skill button taps
+        if (x >= 20 && x <= 100 && y >= CANVAS_HEIGHT - 100 && y <= CANVAS_HEIGHT - 10) {
+          if (gameState === 'PLAYING') throwShuriken();
+          buttonPressed = true;
+        }
+        if (x >= CANVAS_WIDTH - 100 && x <= CANVAS_WIDTH - 20 && y >= CANVAS_HEIGHT - 100 && y <= CANVAS_HEIGHT - 10) {
+          if (gameState === 'PLAYING') block();
+          buttonPressed = true;
+        }
+      }
+
+      touchStartRef.current = { x: touch.clientX, y: touch.clientY, time: Date.now(), buttonPressed };
+    };
+
+    const handleTouchMove = (e: TouchEvent) => {
+      if (e.target instanceof HTMLButtonElement) return;
+      e.preventDefault(); // Prevent scrolling while swiping
+    };
+
+    const handleTouchEnd = (e: TouchEvent) => {
+      if (e.target instanceof HTMLButtonElement) return;
+      
+      const touch = e.changedTouches[0];
+      const start = touchStartRef.current;
+      const dx = touch.clientX - start.x;
+      const dy = touch.clientY - start.y;
+      const dt = Date.now() - start.time;
+
+      if (gameState !== 'PLAYING') {
+        startGame();
+        return;
+      }
+
+      if (start.buttonPressed) return; // Prevent double actions
+
+      // If it was a quick tap without much movement
+      if (Math.abs(dx) < 20 && Math.abs(dy) < 20 && dt < 300) {
+        jump(); // Tap to jump is more intuitive on mobile
+      } else if (Math.abs(dy) > 30 && Math.abs(dy) > Math.abs(dx)) {
+        // Vertical swipe
+        if (dy < 0) {
+          // Swipe Up
+          jump();
+        } else {
+          // Swipe Down
+          slide(true);
+          if (slideTimeoutRef.current) clearTimeout(slideTimeoutRef.current);
+          slideTimeoutRef.current = setTimeout(() => {
+            slide(false);
+          }, 800);
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+    window.addEventListener('touchstart', handleTouchStart, { passive: false });
+    window.addEventListener('touchmove', handleTouchMove, { passive: false });
+    window.addEventListener('touchend', handleTouchEnd);
+
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+      window.removeEventListener('touchstart', handleTouchStart);
+      window.removeEventListener('touchmove', handleTouchMove);
+      window.removeEventListener('touchend', handleTouchEnd);
+      if (slideTimeoutRef.current) clearTimeout(slideTimeoutRef.current);
+    };
+  }, [gameState, jump, slide, throwShuriken, block, startGame]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    let animationFrameId: number;
+
+    const update = (timeScale: number) => {
+      const state = gameStateRef.current;
+      const { ninja, obstacles, clouds } = state;
+
+      // Physics
+      ninja.vy += 0.6 * timeScale; // gravity
+      ninja.y += ninja.vy * timeScale;
+
+      if (ninja.y >= GROUND_Y - ninja.height) {
+        ninja.y = GROUND_Y - ninja.height;
+        ninja.vy = 0;
+        ninja.isJumping = false;
+        ninja.jumpCount = 0;
+      }
+
+      const now = Date.now();
+      if (ninja.isBlocking && now > ninja.blockEndTime) {
+        ninja.isBlocking = false;
+      }
+
+      // Clouds
+      for (const cloud of clouds) {
+        cloud.x -= cloud.speed * timeScale;
+        if (cloud.x + cloud.width < 0) {
+          cloud.x = CANVAS_WIDTH;
+          cloud.y = 20 + Math.random() * (GROUND_Y - 150);
+        }
+      }
+
+      // Enemy Ninja Logic
+      if (state.score >= 100 && state.purpleDeathScore === null && state.enemyNinjas.length === 0) {
+        state.enemyNinjas.push({
+          x: CANVAS_WIDTH + 50, y: GROUND_Y - 40, width: 30, height: 40, vy: 0, isActive: true, actionTimer: 0, jumpCount: 0, targetX: CANVAS_WIDTH - 120, moveTimer: 0, hp: 150, maxHp: 150, isDead: false, type: 'purple'
+        });
+      }
+
+      if (state.purpleDeathScore !== null && state.score >= state.purpleDeathScore + 30 && state.greenDeathScore === null && state.enemyNinjas.length === 0) {
+        state.enemyNinjas.push({
+          x: CANVAS_WIDTH + 50, y: GROUND_Y - 40, width: 30, height: 40, vy: 0, isActive: true, actionTimer: 0, jumpCount: 0, targetX: CANVAS_WIDTH - 120, moveTimer: 0, hp: 300, maxHp: 300, isDead: false, type: 'green'
+        });
+      }
+
+      if (state.greenDeathScore !== null && state.score >= state.greenDeathScore + 30 && !state.redSpawned) {
+        state.redSpawned = true;
+        state.enemyNinjas.push({
+          x: CANVAS_WIDTH + 50, y: GROUND_Y - 40, width: 30, height: 40, vy: 0, isActive: true, actionTimer: 0, jumpCount: 0, targetX: CANVAS_WIDTH - 120, moveTimer: 0, hp: 200, maxHp: 200, isDead: false, type: 'red'
+        });
+        state.enemyNinjas.push({
+          x: CANVAS_WIDTH + 150, y: GROUND_Y - 40, width: 30, height: 40, vy: 0, isActive: true, actionTimer: -12, jumpCount: 0, targetX: CANVAS_WIDTH - 60, moveTimer: 0, hp: 200, maxHp: 200, isDead: false, type: 'red'
+        });
+      }
+
+      if (state.redDeathScore !== null && state.score >= state.redDeathScore + 30 && !state.whiteSpawned) {
+        state.whiteSpawned = true;
+        state.enemyNinjas.push({
+          x: CANVAS_WIDTH + 50, y: GROUND_Y - 40, width: 30, height: 40, vy: 0, isActive: true, actionTimer: 0, jumpCount: 0, targetX: CANVAS_WIDTH - 120, moveTimer: 0, hp: 10000, maxHp: 10000, isDead: false, type: 'white'
+        });
+      }
+
+      for (let i = state.enemyNinjas.length - 1; i >= 0; i--) {
+        const enemy = state.enemyNinjas[i];
+        if (!enemy.isActive) {
+          state.enemyNinjas.splice(i, 1);
+          continue;
+        }
+
+        // White Ninja Phase 3 spawn
+        if (enemy.type === 'white' && enemy.hp <= 3000 && !state.white2Spawned) {
+          state.white2Spawned = true;
+          state.enemyNinjas.push({
+            x: CANVAS_WIDTH + 150, y: GROUND_Y - 40, width: 30, height: 40, vy: 0, isActive: true, actionTimer: -30, jumpCount: 0, targetX: CANVAS_WIDTH - 60, moveTimer: 0, hp: 10000, maxHp: 10000, isDead: false, type: 'white'
+          });
+        }
+        
+        // Dynamic Movement (Forward and Backward)
+        enemy.moveTimer += timeScale;
+        if (enemy.moveTimer > 80) { // Pick a new target X more frequently
+          enemy.moveTimer = 0;
+          // Move anywhere between CANVAS_WIDTH - 400 (close to player) and CANVAS_WIDTH - 50 (far back)
+          enemy.targetX = CANVAS_WIDTH - 50 - Math.random() * 350; 
+        }
+        
+        // Move towards targetX smoothly but faster
+        if (enemy.x < enemy.targetX - 3) enemy.x += 3.5 * timeScale;
+        else if (enemy.x > enemy.targetX + 3) enemy.x -= 3.5 * timeScale;
+
+        // Physics
+        enemy.vy += 0.6 * timeScale;
+        enemy.y += enemy.vy * timeScale;
+        if (enemy.y >= GROUND_Y - enemy.height) {
+          enemy.y = GROUND_Y - enemy.height;
+          enemy.vy = 0;
+          enemy.jumpCount = 0;
+        }
+
+        // Random jumping (including double jumps)
+        // Higher chance to jump if player is jumping or just randomly
+        const shouldJump = Math.random() < 0.03 * timeScale || (ninja.isJumping && Math.random() < 0.05 * timeScale);
+        if (shouldJump && enemy.jumpCount < 2) {
+          enemy.vy = -12; // Jump higher
+          enemy.jumpCount++;
+        }
+
+        // AI Actions (Throwing Shurikens and Swords)
+        enemy.actionTimer += timeScale;
+        if (enemy.actionTimer > 70) { // Throw slightly more often
+          enemy.actionTimer = 0;
+          const throwType = Math.floor(Math.random() * 4);
+          const speed = state.speed * 1.4;
+
+          let isSwordAttack = false;
+          if (enemy.type === 'white' && enemy.hp <= 7000) {
+            isSwordAttack = Math.random() < 0.5; // 50% chance for swords in phase 2/3
+          }
+
+          if (isSwordAttack) {
+            obstacles.push({
+              x: enemy.x, y: enemy.y + 10, width: 40, height: 10, passed: false, type: 'sword',
+              vx: -speed * 1.5, vy: -1,
+            });
+            obstacles.push({
+              x: enemy.x, y: enemy.y + 30, width: 40, height: 10, passed: false, type: 'sword',
+              vx: -speed * 1.5, vy: 1,
+            });
+          } else {
+            if (throwType === 0) {
+              // Aimed directly at player
+              const dx = ninja.x - enemy.x;
+              const dy = ninja.y - enemy.y;
+              const angle = Math.atan2(dy, dx);
+              obstacles.push({
+                x: enemy.x, y: enemy.y + 10, width: 30, height: 30, passed: false, type: 'shuriken',
+                vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed,
+              });
+            } else if (throwType === 1) {
+              // Straight horizontal (Middle)
+              obstacles.push({
+                x: enemy.x, y: enemy.y + 10, width: 30, height: 30, passed: false, type: 'shuriken',
+                vx: -speed, vy: 0,
+              });
+            } else if (throwType === 2) {
+              // Upward diagonal (High)
+              obstacles.push({
+                x: enemy.x, y: enemy.y + 10, width: 30, height: 30, passed: false, type: 'shuriken',
+                vx: -speed * 0.9, vy: -4,
+              });
+            } else {
+              // Downward diagonal (Low)
+              obstacles.push({
+                x: enemy.x, y: enemy.y + 10, width: 30, height: 30, passed: false, type: 'shuriken',
+                vx: -speed * 0.9, vy: 4,
+              });
+            }
+          }
+        }
+      }
+
+      // Obstacles
+      const prevFrames = Math.floor(state.frames);
+      state.frames += timeScale;
+      const currentFrames = Math.floor(state.frames);
+      
+      // Spawn logic: decrease interval as speed increases
+      const spawnInterval = Math.max(50, 120 - Math.floor(state.speed * 4));
+      const actualInterval = state.enemyNinjas.length > 0 ? spawnInterval + 30 : spawnInterval;
+      
+      const shouldSpawn = Math.floor(currentFrames / actualInterval) > Math.floor(prevFrames / actualInterval);
+      
+      if (shouldSpawn) {
+        const rand = Math.random();
+        if (rand < 0.25) {
+          // Bird (High, can be dodged by sliding or double jumping)
+          obstacles.push({
+            x: CANVAS_WIDTH,
+            y: GROUND_Y - 60 - Math.random() * 20,
+            width: 40,
+            height: 30,
+            passed: false,
+            type: 'bird',
+          });
+        } else if (rand < 0.5) {
+          // Monster (Ground, wide)
+          obstacles.push({
+            x: CANVAS_WIDTH,
+            y: GROUND_Y - 40,
+            width: 40 + Math.random() * 20,
+            height: 40,
+            passed: false,
+            type: 'monster',
+          });
+        } else if (rand < 0.75) {
+          // Shuriken (Mid-air, fast)
+          obstacles.push({
+            x: CANVAS_WIDTH,
+            y: GROUND_Y - 30 - Math.random() * 50,
+            width: 30,
+            height: 30,
+            passed: false,
+            type: 'shuriken',
+          });
+        } else {
+          // Building (Ground, tall)
+          obstacles.push({
+            x: CANVAS_WIDTH,
+            y: GROUND_Y - 120,
+            width: 80,
+            height: 120,
+            passed: false,
+            type: 'building',
+          });
+        }
+      }
+
+      for (let i = 0; i < obstacles.length; i++) {
+        const obs = obstacles[i];
+        
+        if (obs.vx !== undefined && obs.vy !== undefined) {
+          obs.x += obs.vx * timeScale;
+          obs.y += obs.vy * timeScale;
+          // Removed gravity for shurikens so they fly straight in their intended direction
+        } else {
+          // Shurikens move faster
+          const obsSpeed = obs.type === 'shuriken' ? state.speed * 1.3 : state.speed;
+          obs.x -= obsSpeed * timeScale;
+        }
+
+        // Collision detection (AABB) with a slightly smaller hitbox for fairness
+        const hitboxPadding = 4;
+        if (
+          ninja.x + hitboxPadding < obs.x + obs.width &&
+          ninja.x + ninja.width - hitboxPadding > obs.x &&
+          ninja.y + hitboxPadding < obs.y + obs.height &&
+          ninja.y + ninja.height - hitboxPadding > obs.y
+        ) {
+          if (ninja.isBlocking && (obs.type === 'shuriken' || obs.type === 'sword')) {
+            // Blocked!
+            obs.passed = true;
+            obs.y = CANVAS_HEIGHT + 100; // Move offscreen to be removed
+            state.score += 15; // Bonus for blocking
+            setScore(state.score);
+          } else {
+            state.isGameOver = true;
+            setGameState('GAMEOVER');
+            setHighScore((prev) => Math.max(prev, state.score));
+          }
+        }
+
+        // Score
+        if (obs.x + obs.width < ninja.x && !obs.passed) {
+          obs.passed = true;
+          state.score += 10;
+          setScore(state.score);
+          if (state.score % 100 === 0) {
+            state.speed += 0.5; // Increase speed
+          }
+        }
+      }
+
+      // Remove off-screen obstacles
+      for (let i = obstacles.length - 1; i >= 0; i--) {
+        if (obstacles[i].x + obstacles[i].width < -50 || obstacles[i].y > CANVAS_HEIGHT + 50) {
+          obstacles.splice(i, 1);
+        }
+      }
+
+      // Player Shurikens
+      for (let i = state.playerShurikens.length - 1; i >= 0; i--) {
+        const ps = state.playerShurikens[i];
+        ps.x += ps.vx * timeScale;
+        
+        let hit = false;
+        
+        // Check collision with enemy ninjas
+        for (let k = 0; k < state.enemyNinjas.length; k++) {
+          const enemy = state.enemyNinjas[k];
+          if (enemy.isActive) {
+            const hitboxPadding = 2;
+            if (
+              ps.x + hitboxPadding < enemy.x + enemy.width &&
+              ps.x + ps.width - hitboxPadding > enemy.x &&
+              ps.y + hitboxPadding < enemy.y + enemy.height &&
+              ps.y + ps.height - hitboxPadding > enemy.y
+            ) {
+              enemy.hp -= 10;
+              hit = true;
+              state.score += 50; // Bonus for hitting boss
+              setScore(state.score);
+              
+              if (enemy.hp <= 0) {
+                enemy.isActive = false;
+                enemy.isDead = true;
+                state.score += 1000; // Bonus for defeating boss
+                setScore(state.score);
+                if (enemy.type === 'purple') {
+                  state.purpleDeathScore = state.score;
+                } else if (enemy.type === 'green') {
+                  state.greenDeathScore = state.score;
+                } else if (enemy.type === 'red') {
+                  if (state.enemyNinjas.filter(n => n.type === 'red' && !n.isDead).length === 0) {
+                    state.redDeathScore = state.score;
+                  }
+                }
+              }
+              break; // Shuriken destroyed
+            }
+          }
+        }
+
+        if (!hit) {
+          for (let j = obstacles.length - 1; j >= 0; j--) {
+            const obs = obstacles[j];
+            if (obs.type === 'monster') {
+              const hitboxPadding = 2;
+              if (
+                ps.x + hitboxPadding < obs.x + obs.width &&
+                ps.x + ps.width - hitboxPadding > obs.x &&
+                ps.y + hitboxPadding < obs.y + obs.height &&
+                ps.y + ps.height - hitboxPadding > obs.y
+              ) {
+                // Hit!
+                obstacles.splice(j, 1);
+                hit = true;
+                state.score += 20; // Bonus score for defeating the villager
+                setScore(state.score);
+                break;
+              }
+            }
+          }
+        }
+
+        if (hit || ps.x > CANVAS_WIDTH + 50) {
+          state.playerShurikens.splice(i, 1);
+        }
+      }
+    };
+
+    const draw = () => {
+      const state = gameStateRef.current;
+      const { ninja, obstacles, clouds } = state;
+
+      // Clear & Sky (Darker Sunset Gradient)
+      const skyGradient = ctx.createLinearGradient(0, 0, 0, CANVAS_HEIGHT);
+      skyGradient.addColorStop(0, '#170838'); // Darker deep purple
+      skyGradient.addColorStop(0.5, '#6b0f2a'); // Darker rose/red
+      skyGradient.addColorStop(1, '#9a3412'); // Darker orange
+      ctx.fillStyle = skyGradient;
+      ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+
+      // Big Red Sun (Slightly darker)
+      ctx.fillStyle = '#b91c1c';
+      ctx.beginPath();
+      ctx.arc(CANVAS_WIDTH / 2, GROUND_Y - 40, 80, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Clouds
+      ctx.fillStyle = 'rgba(255, 200, 200, 0.1)';
+      for (const cloud of clouds) {
+        ctx.beginPath();
+        ctx.arc(cloud.x, cloud.y, cloud.width / 2, 0, Math.PI * 2);
+        ctx.arc(cloud.x + cloud.width / 3, cloud.y - 10, cloud.width / 2.5, 0, Math.PI * 2);
+        ctx.arc(cloud.x + cloud.width / 1.5, cloud.y, cloud.width / 2.5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // Mount Fuji (Background Mountain)
+      ctx.fillStyle = '#0f0e26'; // Even darker indigo
+      ctx.beginPath();
+      ctx.moveTo(CANVAS_WIDTH / 2 - 300, GROUND_Y);
+      ctx.lineTo(CANVAS_WIDTH / 2, GROUND_Y - 200);
+      ctx.lineTo(CANVAS_WIDTH / 2 + 300, GROUND_Y);
+      ctx.fill();
+      
+      // Snow cap (Dimmer)
+      ctx.fillStyle = '#a5b4fc';
+      ctx.beginPath();
+      ctx.moveTo(CANVAS_WIDTH / 2 - 75, GROUND_Y - 150);
+      ctx.lineTo(CANVAS_WIDTH / 2, GROUND_Y - 200);
+      ctx.lineTo(CANVAS_WIDTH / 2 + 75, GROUND_Y - 150);
+      ctx.lineTo(CANVAS_WIDTH / 2 + 40, GROUND_Y - 130);
+      ctx.lineTo(CANVAS_WIDTH / 2, GROUND_Y - 155);
+      ctx.lineTo(CANVAS_WIDTH / 2 - 40, GROUND_Y - 130);
+      ctx.fill();
+
+      // Ground
+      ctx.fillStyle = '#020617'; // Very dark ground
+      ctx.fillRect(0, GROUND_Y, CANVAS_WIDTH, CANVAS_HEIGHT - GROUND_Y);
+      ctx.fillStyle = '#1e293b'; // Ground top edge
+      ctx.fillRect(0, GROUND_Y, CANVAS_WIDTH, 4);
+
+      // Ninja
+      ctx.fillStyle = '#000000';
+      ctx.fillRect(ninja.x, ninja.y, ninja.width, ninja.height);
+      // Headband
+      ctx.fillStyle = '#ef4444';
+      ctx.fillRect(ninja.x, ninja.y + (ninja.isSliding ? 2 : 6), ninja.width, 6);
+      // Headband tie (flapping)
+      if (gameState === 'PLAYING') {
+        ctx.beginPath();
+        ctx.moveTo(ninja.x, ninja.y + (ninja.isSliding ? 5 : 9));
+        ctx.lineTo(ninja.x - 15, ninja.y + (ninja.isSliding ? 1 : 5) + Math.sin(state.frames * 0.5) * 5);
+        ctx.lineTo(ninja.x - 15, ninja.y + (ninja.isSliding ? 9 : 13) + Math.sin(state.frames * 0.5) * 5);
+        ctx.fill();
+      }
+      // Eye
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(ninja.x + ninja.width - 12, ninja.y + (ninja.isSliding ? 10 : 14), 6, 4);
+
+      // Sword (if blocking)
+      if (ninja.isBlocking) {
+        ctx.fillStyle = '#cbd5e1'; // Silver sword
+        ctx.beginPath();
+        ctx.moveTo(ninja.x + ninja.width, ninja.y + 20);
+        ctx.lineTo(ninja.x + ninja.width + 25, ninja.y - 5);
+        ctx.lineTo(ninja.x + ninja.width + 28, ninja.y - 2);
+        ctx.lineTo(ninja.x + ninja.width + 5, ninja.y + 25);
+        ctx.fill();
+        
+        // Sword handle
+        ctx.fillStyle = '#78350f'; // Brown handle
+        ctx.fillRect(ninja.x + ninja.width - 5, ninja.y + 20, 10, 8);
+      }
+
+      // Player Shurikens
+      for (const ps of state.playerShurikens) {
+        ctx.save();
+        ctx.translate(ps.x + ps.width / 2, ps.y + ps.height / 2);
+        ctx.rotate(state.frames * 0.4);
+        ctx.fillStyle = '#cbd5e1'; // Silver/light gray
+        
+        ctx.beginPath();
+        for (let i = 0; i < 4; i++) {
+          ctx.lineTo(0, -ps.width / 2);
+          ctx.lineTo(ps.width / 6, -ps.width / 6);
+          ctx.rotate(Math.PI / 2);
+        }
+        ctx.closePath();
+        ctx.fill();
+        
+        ctx.fillStyle = '#0f172a';
+        ctx.beginPath();
+        ctx.arc(0, 0, 2, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+
+      // Enemy Ninjas
+      let bossIndex = 0;
+      for (const enemy of state.enemyNinjas) {
+        if (!enemy.isActive) continue;
+        
+        ctx.fillStyle = enemy.type === 'purple' ? '#4c1d95' : enemy.type === 'green' ? '#15803d' : enemy.type === 'red' ? '#b91c1c' : '#ffffff'; // Dark purple, Dark green, Dark red, or White
+        ctx.fillRect(enemy.x, enemy.y, enemy.width, enemy.height);
+        // Headband
+        ctx.fillStyle = enemy.type === 'purple' ? '#fbbf24' : enemy.type === 'green' ? '#ef4444' : enemy.type === 'red' ? '#000000' : '#ef4444'; // Yellow, Red, Black, or Red
+        ctx.fillRect(enemy.x, enemy.y + 6, enemy.width, 6);
+        // Headband tie
+        ctx.beginPath();
+        ctx.moveTo(enemy.x + enemy.width, enemy.y + 9);
+        ctx.lineTo(enemy.x + enemy.width + 15, enemy.y + 5 + Math.sin(state.frames * 0.5) * 5);
+        ctx.lineTo(enemy.x + enemy.width + 15, enemy.y + 13 + Math.sin(state.frames * 0.5) * 5);
+        ctx.fill();
+        // Eye (facing left)
+        ctx.fillStyle = enemy.type === 'white' ? '#000000' : '#ffffff';
+        ctx.fillRect(enemy.x + 6, enemy.y + 14, 6, 4);
+
+        // Boss HP Bar
+        const hpRatio = Math.max(0, enemy.hp / enemy.maxHp);
+        const barWidth = CANVAS_WIDTH - 200;
+        const barHeight = 20;
+        const barX = 100;
+        const barY = 20 + (bossIndex * 30); // Stack HP bars if multiple
+        
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+        ctx.fillRect(barX, barY, barWidth, barHeight);
+        
+        ctx.fillStyle = enemy.type === 'purple' ? '#a855f7' : enemy.type === 'green' ? '#22c55e' : enemy.type === 'red' ? '#ef4444' : '#ffffff'; // Purple, Green, Red, or White HP
+        ctx.fillRect(barX, barY, barWidth * hpRatio, barHeight);
+        
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(barX, barY, barWidth, barHeight);
+        
+        ctx.fillStyle = enemy.type === 'white' ? '#000000' : '#ffffff';
+        ctx.font = 'bold 14px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        const bossName = enemy.type === 'purple' ? 'PURPLE NINJA' : enemy.type === 'green' ? 'GREEN NINJA' : enemy.type === 'red' ? 'RED TWIN NINJA' : 'WHITE NINJA';
+        ctx.fillText(`${bossName} - ${enemy.hp}/${enemy.maxHp}`, CANVAS_WIDTH / 2, barY + barHeight / 2);
+        
+        bossIndex++;
+      }
+
+      // Obstacles
+      for (const obs of obstacles) {
+        if (obs.type === 'sword') {
+          ctx.save();
+          ctx.translate(obs.x + obs.width / 2, obs.y + obs.height / 2);
+          // Rotate based on velocity
+          const angle = Math.atan2(obs.vy || 0, obs.vx || -1);
+          ctx.rotate(angle);
+          
+          // Draw sword blade
+          ctx.fillStyle = '#e2e8f0'; // Silver
+          ctx.fillRect(-obs.width / 2, -obs.height / 4, obs.width * 0.8, obs.height / 2);
+          // Draw sword tip
+          ctx.beginPath();
+          ctx.moveTo(obs.width * 0.3, -obs.height / 4);
+          ctx.lineTo(obs.width / 2, 0);
+          ctx.lineTo(obs.width * 0.3, obs.height / 4);
+          ctx.fill();
+          // Draw hilt
+          ctx.fillStyle = '#b91c1c'; // Red hilt
+          ctx.fillRect(-obs.width / 2, -obs.height / 2, obs.width * 0.2, obs.height);
+          
+          ctx.restore();
+        } else if (obs.type === 'shuriken') {
+          // Flying shuriken
+          ctx.save();
+          ctx.translate(obs.x + obs.width / 2, obs.y + obs.height / 2);
+          ctx.rotate(state.frames * 0.3);
+          ctx.fillStyle = '#94a3b8';
+          
+          ctx.beginPath();
+          for (let i = 0; i < 4; i++) {
+            ctx.lineTo(0, -obs.width / 2);
+            ctx.lineTo(obs.width / 6, -obs.width / 6);
+            ctx.rotate(Math.PI / 2);
+          }
+          ctx.closePath();
+          ctx.fill();
+          
+          ctx.fillStyle = '#0f172a';
+          ctx.beginPath();
+          ctx.arc(0, 0, 3, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
+        } else if (obs.type === 'bird') {
+          // Bird
+          ctx.fillStyle = '#38bdf8'; // light blue
+          ctx.beginPath();
+          ctx.ellipse(obs.x + obs.width / 2, obs.y + obs.height / 2, obs.width / 2, obs.height / 3, 0, 0, Math.PI * 2);
+          ctx.fill();
+          // Wings flapping
+          ctx.beginPath();
+          ctx.moveTo(obs.x + obs.width / 2, obs.y + obs.height / 2);
+          ctx.lineTo(obs.x + obs.width / 2 + 10, obs.y + obs.height / 2 - 15 + Math.sin(state.frames * 0.5) * 20);
+          ctx.lineTo(obs.x + obs.width / 2 - 10, obs.y + obs.height / 2 - 15 + Math.sin(state.frames * 0.5) * 20);
+          ctx.fill();
+          // Beak
+          ctx.fillStyle = '#fbbf24';
+          ctx.beginPath();
+          ctx.moveTo(obs.x, obs.y + obs.height / 2);
+          ctx.lineTo(obs.x - 10, obs.y + obs.height / 2 + 5);
+          ctx.lineTo(obs.x, obs.y + obs.height / 2 + 10);
+          ctx.fill();
+        } else if (obs.type === 'monster') {
+          // Old Japanese Person (Villager with conical hat)
+          const centerX = obs.x + obs.width / 2;
+          
+          // Body (Kimono)
+          ctx.fillStyle = '#334155'; // Dark slate kimono
+          ctx.beginPath();
+          ctx.moveTo(centerX - 12, obs.y + 15);
+          ctx.lineTo(centerX + 12, obs.y + 15);
+          ctx.lineTo(centerX + 18, obs.y + obs.height);
+          ctx.lineTo(centerX - 18, obs.y + obs.height);
+          ctx.fill();
+          
+          // Sash (Obi)
+          ctx.fillStyle = '#0f172a';
+          ctx.fillRect(centerX - 14, obs.y + 25, 28, 6);
+          
+          // Head
+          ctx.fillStyle = '#fcd34d'; // Skin tone
+          ctx.beginPath();
+          ctx.arc(centerX, obs.y + 12, 7, 0, Math.PI * 2);
+          ctx.fill();
+          
+          // Conical Hat (Kasa)
+          ctx.fillStyle = '#b45309'; // Straw color
+          ctx.beginPath();
+          ctx.moveTo(centerX - 20, obs.y + 10);
+          ctx.lineTo(centerX, obs.y - 2);
+          ctx.lineTo(centerX + 20, obs.y + 10);
+          ctx.fill();
+          
+          // Walking stick
+          ctx.fillStyle = '#78350f'; // Dark brown
+          ctx.fillRect(centerX + 15, obs.y + 10, 3, obs.height - 10);
+        } else if (obs.type === 'building') {
+          // Traditional Japanese Building Obstacle
+          ctx.fillStyle = '#0f172a'; // dark silhouette
+          ctx.fillRect(obs.x + 10, obs.y + 30, obs.width - 20, obs.height - 30); // Base
+          
+          // Roof
+          ctx.fillStyle = '#1e293b';
+          ctx.beginPath();
+          ctx.moveTo(obs.x - 10, obs.y + 30);
+          ctx.lineTo(obs.x + obs.width + 10, obs.y + 30);
+          ctx.lineTo(obs.x + obs.width - 15, obs.y);
+          ctx.lineTo(obs.x + 15, obs.y);
+          ctx.fill();
+          
+          // Windows (Shoji screens)
+          ctx.fillStyle = '#fef08a'; // warm light
+          ctx.fillRect(obs.x + 20, obs.y + 50, 15, 25);
+          ctx.fillRect(obs.x + obs.width - 35, obs.y + 50, 15, 25);
+          
+          // Wood grid on windows
+          ctx.fillStyle = '#0f172a';
+          ctx.fillRect(obs.x + 27, obs.y + 50, 2, 25);
+          ctx.fillRect(obs.x + 20, obs.y + 62, 15, 2);
+          ctx.fillRect(obs.x + obs.width - 28, obs.y + 50, 2, 25);
+          ctx.fillRect(obs.x + obs.width - 35, obs.y + 62, 15, 2);
+        }
+      }
+
+      // Draw Cooldown UI
+      const nowTime = Date.now();
+      
+      // Q Skill (Shuriken)
+      const qCooldown = 250;
+      const qElapsed = nowTime - state.lastShurikenTime;
+      const qRatio = Math.max(0, 1 - qElapsed / qCooldown);
+      
+      ctx.fillStyle = '#1e293b';
+      ctx.fillRect(20, CANVAS_HEIGHT - 80, 60, 60);
+      ctx.strokeStyle = '#475569';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(20, CANVAS_HEIGHT - 80, 60, 60);
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 16px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('표창', 50, CANVAS_HEIGHT - 56);
+      ctx.font = '10px sans-serif';
+      ctx.fillStyle = '#94a3b8';
+      ctx.fillText('(Q)', 50, CANVAS_HEIGHT - 38);
+      
+      if (qRatio > 0) {
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+        ctx.fillRect(20, CANVAS_HEIGHT - 80 + (60 * (1 - qRatio)), 60, 60 * qRatio);
+      }
+
+      // W Skill (Block)
+      const wCooldown = 1000;
+      const wElapsed = nowTime - state.lastBlockTime;
+      const wRatio = Math.max(0, 1 - wElapsed / wCooldown);
+      
+      ctx.fillStyle = '#1e293b';
+      ctx.fillRect(CANVAS_WIDTH - 80, CANVAS_HEIGHT - 80, 60, 60);
+      ctx.strokeStyle = '#475569';
+      ctx.strokeRect(CANVAS_WIDTH - 80, CANVAS_HEIGHT - 80, 60, 60);
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 16px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('막기', CANVAS_WIDTH - 50, CANVAS_HEIGHT - 56);
+      ctx.font = '10px sans-serif';
+      ctx.fillStyle = '#94a3b8';
+      ctx.fillText('(W)', CANVAS_WIDTH - 50, CANVAS_HEIGHT - 38);
+      
+      if (wRatio > 0) {
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+        ctx.fillRect(CANVAS_WIDTH - 80, CANVAS_HEIGHT - 80 + (60 * (1 - wRatio)), 60, 60 * wRatio);
+      }
+    };
+
+    const loop = (timestamp: number) => {
+      if (!gameStateRef.current.lastTime) {
+        gameStateRef.current.lastTime = timestamp;
+      }
+      const dt = timestamp - gameStateRef.current.lastTime;
+      gameStateRef.current.lastTime = timestamp;
+
+      // Cap dt to prevent huge jumps if tab is inactive
+      const cappedDt = Math.min(dt, 50);
+      const timeScale = cappedDt / (1000 / 60); // 1.0 at 60fps
+
+      if (gameState === 'PLAYING') {
+        update(timeScale);
+      }
+      draw();
+      if (gameState === 'PLAYING' || gameState === 'START') {
+        animationFrameId = requestAnimationFrame(loop);
+      }
+    };
+
+    if (gameState === 'START') {
+      initGame();
+      draw(); // Draw initial state
+    } else if (gameState === 'PLAYING') {
+      animationFrameId = requestAnimationFrame(loop);
+    } else if (gameState === 'GAMEOVER') {
+      draw(); // Draw final state once
+    }
+
+    return () => {
+      if (animationFrameId) cancelAnimationFrame(animationFrameId);
+    };
+  }, [gameState, initGame]);
+
+  return (
+    <div className="min-h-screen bg-neutral-900 flex flex-col items-center justify-center p-0 md:p-4 font-sans select-none overflow-hidden touch-none">
+      {/* Portrait Warning Overlay */}
+      <div className="fixed inset-0 z-50 bg-neutral-900 flex flex-col items-center justify-center text-white p-8 text-center portrait:flex landscape:hidden">
+        <svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="mb-6 animate-pulse">
+          <rect x="5" y="2" width="14" height="20" rx="2" ry="2"></rect>
+          <path d="M12 18h.01"></path>
+          <path d="M16.5 9.4 7.5 14.6"></path>
+        </svg>
+        <h2 className="text-2xl font-bold mb-2">화면을 가로로 돌려주세요</h2>
+        <p className="text-neutral-400">이 게임은 가로 모드에서 가장 잘 작동합니다.</p>
+      </div>
+
+      <div className="w-full h-full md:h-auto md:max-w-4xl relative flex items-center justify-center">
+        {/* Score Display */}
+        <div className="absolute top-4 right-6 text-right z-10 pointer-events-none">
+          <div className="text-white text-2xl font-bold font-mono drop-shadow-md">
+            {score.toString().padStart(5, '0')}
+          </div>
+          {highScore > 0 && (
+            <div className="text-neutral-400 text-sm font-mono uppercase tracking-wider">
+              HI {highScore.toString().padStart(5, '0')}
+            </div>
+          )}
+        </div>
+
+        {/* Game Canvas */}
+        <div className="relative w-full max-h-screen aspect-[2/1] md:rounded-xl overflow-hidden shadow-2xl shadow-black/50 border-0 md:border-4 border-neutral-800 bg-neutral-900">
+          <canvas
+            ref={canvasRef}
+            width={CANVAS_WIDTH}
+            height={CANVAS_HEIGHT}
+            className="w-full h-full block touch-none"
+          />
+
+          {/* Overlays */}
+          {gameState === 'START' && (
+            <div className="absolute inset-0 bg-black/40 flex flex-col items-center justify-center backdrop-blur-sm">
+              <h1 className="text-5xl md:text-7xl font-black text-white mb-2 tracking-tighter uppercase italic drop-shadow-lg text-center">
+                Ninja Runner
+              </h1>
+              <p className="text-neutral-300 mb-8 text-lg font-medium tracking-wide text-center">
+                Press Space or Swipe Up to Jump<br/>
+                Press Down or Swipe Down to Slide<br/>
+                Press Q or Tap to Throw Shuriken<br/>
+                Press W or Tap Skill Icon to Block
+              </p>
+              <button
+                onClick={startGame}
+                className="px-8 py-3 bg-red-600 hover:bg-red-500 text-white font-bold rounded-full text-xl transition-transform active:scale-95 shadow-lg shadow-red-600/20 uppercase tracking-wider"
+              >
+                Start Game
+              </button>
+            </div>
+          )}
+
+          {gameState === 'GAMEOVER' && (
+            <div className="absolute inset-0 bg-black/60 flex flex-col items-center justify-center backdrop-blur-md animate-in fade-in duration-300">
+              <h2 className="text-5xl md:text-6xl font-black text-red-500 mb-2 uppercase tracking-widest drop-shadow-lg text-center">
+                Game Over
+              </h2>
+              <div className="text-white text-2xl mb-8 font-mono">
+                Score: {score}
+              </div>
+              <button
+                onClick={startGame}
+                className="px-8 py-3 bg-white hover:bg-neutral-200 text-black font-bold rounded-full text-xl transition-transform active:scale-95 shadow-xl uppercase tracking-wider"
+              >
+                Play Again
+              </button>
+            </div>
+          )}
+        </div>
+        
+        <div className="mt-6 text-center text-neutral-500 text-sm">
+          <p>Use <kbd className="px-2 py-1 bg-neutral-800 rounded text-neutral-300 font-mono">Space</kbd> or <kbd className="px-2 py-1 bg-neutral-800 rounded text-neutral-300 font-mono">↑</kbd> to jump (press twice for double jump).</p>
+          <p className="mt-2">Use <kbd className="px-2 py-1 bg-neutral-800 rounded text-neutral-300 font-mono">↓</kbd> to slide. Mobile: Swipe Up to jump, Swipe Down to slide, Tap to throw shuriken.</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
